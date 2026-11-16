@@ -13,6 +13,10 @@ costs one extra model pass per step.
 * **Style Match** (0 to 1, default 0.6): how far the statistics move. Near 1 the image falls apart.
 * **Style Restyle** (default on): the first quarter of the steps run without the picture, so the image keeps the
   composition the prompt would have had. Off gives a stronger style, with a composition that drifts towards the picture's.
+* **Style Megapixels** (0.5 to 4, default 1): the picture is shrunk to this area first, keeping its aspect ratio
+  (never enlarged). About the generated image's own size works best (1 for 1024x1024). Smaller loses coarse texture
+  such as pixel-art blocks. Larger drifts off the style, and at 4 with a 1024x1024 image the result falls apart.
+  Bigger is also slower: at 1024x1024 the extra pass adds about half a step at 0.5 and a whole step at 1.
 
 ## Install
 

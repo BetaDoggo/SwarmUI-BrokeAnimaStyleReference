@@ -19,6 +19,8 @@ public class BrokeAnimaStyleReferenceExtension : Extension
 
     public static T2IRegisteredParam<bool> Restyle;
 
+    public static T2IRegisteredParam<double> Megapixels;
+
     public static T2IParamGroup StyleGroup;
 
     public override void OnPreInit()
@@ -36,6 +38,9 @@ public class BrokeAnimaStyleReferenceExtension : Extension
             ));
         Restyle = T2IParamTypes.Register<bool>(new("Style Restyle", "[Broke Anima Style Reference]\nLeave the first quarter of the steps alone, so the image keeps the composition your prompt would have had without the picture.\nOff gives a stronger style, with a composition that drifts towards the picture's.",
             "true", Group: StyleGroup, FeatureFlag: FeatureID, OrderPriority: 3
+            ));
+        Megapixels = T2IParamTypes.Register<double>(new("Style Megapixels", "[Broke Anima Style Reference]\nThe picture is shrunk (never enlarged) to this area, keeping its aspect ratio.\nAbout the generated image's size works best (1 for 1024x1024): smaller loses coarse texture such as pixel-art blocks, larger drifts off the style and falls apart near 4.\nBigger is slower.",
+            "1", Min: 0.5, Max: 4, Step: 0.05, ViewType: ParamViewType.SLIDER, Group: StyleGroup, FeatureFlag: FeatureID, OrderPriority: 4, Examples: ["0.5", "1", "2"]
             ));
         // -9.4: after the model loader (LoRAs included) and SnapRef (-9.5), before the steps that act on the prompt images (-7)
         WorkflowGenerator.AddStep(g =>
@@ -76,7 +81,8 @@ public class BrokeAnimaStyleReferenceExtension : Extension
                 ["vae"] = g.CurrentVae.Path,
                 ["image"] = styleImage.Path,
                 ["stats_match"] = match,
-                ["restyle"] = g.UserInput.Get(Restyle, true)
+                ["restyle"] = g.UserInput.Get(Restyle, true),
+                ["reference_megapixels"] = g.UserInput.Get(Megapixels, 1)
             });
             g.CurrentModel = g.CurrentModel.WithPath([node, 0]);
         }, -9.4);

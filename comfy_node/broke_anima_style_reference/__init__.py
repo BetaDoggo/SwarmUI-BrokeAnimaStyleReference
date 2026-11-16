@@ -6,6 +6,10 @@ with a neutral caption. After every block, each channel of the generated image's
 the DiT, on the residual stream). Only 2 x 2048 numbers per block cross over, with no positions, so the picture's
 palette, tonality and texture carry over but its subject doesn't.
 
+reference_megapixels (default 1) is the size the picture is shrunk to first, aspect kept; it is never enlarged.
+About the generated image's own size works best: smaller loses coarse texture such as pixel-art blocks, larger
+drifts off the style, and at 4 with a 1024x1024 image the result falls apart. Bigger is also slower.
+
 restyle (on by default) leaves the first quarter of the steps alone (steps 0 and 1 of 8), so the image keeps the
 composition it would have had without the reference.
 
@@ -20,9 +24,9 @@ import comfy.patcher_extension
 import comfy.utils
 
 WRAPPER_KEY = "broke_anima_style_reference"
-# the reference pass's prompt, the picture's size and the noise it's noised with: as the measured method
+# the reference pass's prompt, the picture's default size and the noise it's noised with
 CAPTION = "no humans, scenery, detailed background"
-MEGAPIXELS = 0.5
+MEGAPIXELS = 1.0
 NOISE_SEED = 0x5EED
 # restyle: the first quarter of the steps run without the reference (2 of 8)
 RESTYLE_SKIP = 0.25
@@ -153,6 +157,11 @@ class BrokeAnimaStyleReference:
                 "restyle": ("BOOLEAN", {"default": True,
                                         "tooltip": "leave the first quarter of the steps alone, keeping the composition the "
                                                    "prompt would have had without the picture"}),
+                "reference_megapixels": ("FLOAT", {"default": MEGAPIXELS, "min": 0.5, "max": 4.0, "step": 0.05,
+                                                   "tooltip": "the picture is shrunk (never enlarged) to this area, aspect kept. "
+                                                              "About the generated image's size works best (1 for 1024x1024): smaller "
+                                                              "loses coarse texture such as pixel-art blocks, larger drifts off the "
+                                                              "style and falls apart near 4. Bigger is slower"}),
             }
         }
 
@@ -162,10 +171,10 @@ class BrokeAnimaStyleReference:
     DESCRIPTION = ("Training-free style from a picture for Anima: matches each block's per-channel statistics to the "
                    "picture's at the same noise level. Takes palette, tonality and texture, not the subject.")
 
-    def apply(self, model, clip, vae, image, stats_match, restyle):
+    def apply(self, model, clip, vae, image, stats_match, restyle, reference_megapixels=MEGAPIXELS):
         if stats_match <= 0:
             return (model,)
-        latent, (width, height) = _encode_image(model, vae, image)
+        latent, (width, height) = _encode_image(model, vae, image, float(reference_megapixels))
         cond = clip.encode_from_tokens_scheduled(clip.tokenize(CAPTION))[0]
         m = model.clone()
         m.add_wrapper_with_key(comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL, WRAPPER_KEY,
