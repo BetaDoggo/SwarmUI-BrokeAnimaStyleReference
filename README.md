@@ -2,6 +2,9 @@
 
 A shitty vibed up training-free style reference method for anima. Only tested on turbo because I'm lazy.
 
+<img width="1431" height="1067" alt="Screenshot 2026-11-16 133538" src="https://github.com/user-attachments/assets/c4b8e851-5955-4489-9ec1-e98d033c2391" />
+
+
 ## How it works
 
 At each sampling step, the picture is noised to that step's noise level and run through the unmodified model with a
