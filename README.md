@@ -21,6 +21,10 @@ costs one extra model pass per step.
   such as pixel-art blocks. Larger drifts off the style, and at 4 with a 1024x1024 image the result falls apart.
   Bigger is also slower: at 1024x1024 the extra pass adds about half a step at 0.5 and a whole step at 1.
 
+It also works with **Krea 2** (tested on Krea 2 Turbo). Krea 2 keeps the prompt's content and composition better than
+Anima, with a slightly weaker style, and stays intact up to at least 0.8 Style Match, where pixel art keeps improving.
+Line-art references such as an ink sketch don't transfer on Krea 2.
+
 ## Install
 
 Just copy this folder into `SwarmUI/src/Extensions/` and restart SwarmUI. The comfy portion is included, though you will need to put it into your custom nodes folder manually if you're using a remote comfy.

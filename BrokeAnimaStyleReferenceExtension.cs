@@ -8,7 +8,7 @@ using System.IO;
 
 namespace BetaDoggo.Extensions.BrokeAnimaStyleReference;
 
-/// <summary>Adds Broke Anima Style Reference: a training-free art style from a picture, for Anima. Each step the picture is noised
+/// <summary>Adds Broke Anima Style Reference: a training-free art style from a picture, for Anima and Krea 2. Each step the picture is noised
 /// to the current noise level and run through the model, and every block's per-channel statistics of the image are moved
 /// towards the picture's. The palette, tonality and texture carry over, the picture's subject doesn't.</summary>
 public class BrokeAnimaStyleReferenceExtension : Extension
@@ -32,8 +32,8 @@ public class BrokeAnimaStyleReferenceExtension : Extension
     public override void OnInit()
     {
         ComfyUIBackendExtension.NodeToFeatureMap["BrokeAnimaStyleReference"] = FeatureID;
-        StyleGroup = new("Broke Anima Style Reference", Toggles: true, Open: false, Description: "Training-free art style from a picture, for Anima.\nThe picture's colours, tonality and texture carry over, its subject doesn't.\nPut the style picture in the prompt box, as for SnapRef (only the first image is used).\nOne extra model pass per step.");
-        StatsMatch = T2IParamTypes.Register<double>(new("Style Match", "[Broke Anima Style Reference]\nHow far the image's statistics move towards the picture's after every block.\n0 is off, 0.6 is a good default, near 1 the image falls apart.",
+        StyleGroup = new("Broke Anima Style Reference", Toggles: true, Open: false, Description: "Training-free art style from a picture, for Anima and Krea 2.\nThe picture's colours, tonality and texture carry over, its subject doesn't.\nPut the style picture in the prompt box, as for SnapRef (only the first image is used).\nOne extra model pass per step.");
+        StatsMatch = T2IParamTypes.Register<double>(new("Style Match", "[Broke Anima Style Reference]\nHow far the image's statistics move towards the picture's after every block.\n0 is off, 0.6 is a good default. Near 1 the image falls apart on Anima; Krea 2 holds up to at least 0.8.",
             "0.6", Min: 0, Max: 1, Step: 0.05, ViewType: ParamViewType.SLIDER, Group: StyleGroup, FeatureFlag: FeatureID, OrderPriority: 2, Examples: ["0.4", "0.6", "0.8"]
             ));
         Restyle = T2IParamTypes.Register<bool>(new("Style Restyle", "[Broke Anima Style Reference]\nLeave the first quarter of the steps alone, so the image keeps the composition your prompt would have had without the picture.\nOff gives a stronger style, with a composition that drifts towards the picture's.",
@@ -53,9 +53,9 @@ public class BrokeAnimaStyleReferenceExtension : Extension
             {
                 throw new SwarmUserErrorException("Broke Anima Style Reference parameters specified, but the BrokeAnimaStyleReference node isn't available on this backend");
             }
-            if (!g.IsAnima())
+            if (!g.IsAnima() && !g.IsKrea2())
             {
-                throw new SwarmUserErrorException("Broke Anima Style Reference only works with Anima models");
+                throw new SwarmUserErrorException("Broke Anima Style Reference only works with Anima and Krea 2 models");
             }
             // SnapRef (-9.5) runs first and takes the prompt images itself, so with both enabled there are none left here
             if (!g.UserInput.TryGet(T2IParamTypes.PromptImages, out List<Image> references) || references.Count == 0)

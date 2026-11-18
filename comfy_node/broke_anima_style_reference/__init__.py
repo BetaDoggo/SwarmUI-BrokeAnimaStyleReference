@@ -1,10 +1,14 @@
-"""Broke Anima Style Reference: a training-free art style from a picture, for Anima (Cosmos Predict2 MiniTrainDIT).
+"""Broke Anima Style Reference: a training-free art style from a picture, for Anima (Cosmos Predict2 MiniTrainDIT)
+and Krea 2 (SingleStreamDiT).
 
 Each sampling step, the picture is noised to that step's sigma (fixed noise) and run through the unmodified model
 with a neutral caption. After every block, each channel of the generated image's tokens is moved a share
 `stats_match` of the way to the picture's per-channel mean and standard deviation at the same block (AdaIN inside
-the DiT, on the residual stream). Only 2 x 2048 numbers per block cross over, with no positions, so the picture's
+the DiT, on the residual stream). Only 2 x D numbers per block cross over, with no positions, so the picture's
 palette, tonality and texture carry over but its subject doesn't.
+
+Krea 2 is single-stream: text and image tokens share one sequence, so the statistics are taken over, and applied to,
+the image tokens only (transformer_options["img_slice"]).
 
 reference_megapixels (default 1) is the size the picture is shrunk to first, aspect kept; it is never enlarged.
 About the generated image's own size works best: smaller loses coarse texture such as pixel-art blocks, larger
@@ -24,13 +28,23 @@ import comfy.patcher_extension
 import comfy.utils
 
 WRAPPER_KEY = "broke_anima_style_reference"
-# the reference pass's prompt, the picture's default size and the noise it's noised with
+# the reference pass's prompt per model, the picture's default size and the noise it's noised with
 CAPTION = "no humans, scenery, detailed background"
+KREA2_CAPTION = "scenery with a detailed background, no people"
 MEGAPIXELS = 1.0
 NOISE_SEED = 0x5EED
 # restyle: the first quarter of the steps run without the reference (2 of 8)
 RESTYLE_SKIP = 0.25
 EPS = 1e-5
+
+
+def _family(model) -> str:
+    dm = model.model.diffusion_model
+    if hasattr(dm, "blocks") and hasattr(dm, "preprocess_text_embeds"):
+        return "anima"
+    if hasattr(dm, "blocks") and hasattr(dm, "txtfusion"):
+        return "krea2"
+    raise RuntimeError("Broke Anima Style Reference only works with Anima and Krea 2 models")
 
 
 def _encode_image(model, vae, image, megapixels: float = MEGAPIXELS):
@@ -57,33 +71,31 @@ def _step_index(sigma: float, sample_sigmas) -> int | None:
 
 
 def _stats(x: torch.Tensor):
-    """Per-channel mean and (population) variance over every token: x [B, T, H, W, D] -> ([B, D], [B, D])."""
+    """Per-channel mean and (population) variance over every token: x [B, ..., D] -> ([B, D], [B, D])."""
     xf = x.float().flatten(1, -2)
     mean = xf.mean(1)
     var = (xf * xf).mean(1) - mean * mean
     return mean, var.clamp_min(0)
 
 
-def _make_wrapper(ref_latent: torch.Tensor, ref_cond, strength: float, restyle: bool):
+def _make_wrapper(family: str, ref_latent: torch.Tensor, ref_cond, strength: float, restyle: bool):
     noise_cache = {}
     ctx_cache = {}
 
-    def wrapper(executor, x, timesteps, context, fps=None, padding_mask=None, **kwargs):
-        options = kwargs.get("transformer_options", {})
+    def run(executor, x, timesteps, context, call_ref, call_main, options):
+        """The shared part. call_ref(x_ref, t, ctx, ref_options) and call_main() run the model."""
         flags = options.get("cond_or_uncond") or [0]
         sigmas = options.get("sigmas")
         if strength <= 0 or sigmas is None or 0 not in flags:
-            return executor(x, timesteps, context, fps, padding_mask, **kwargs)
+            return call_main()
         sigma = float(sigmas.flatten()[0])
         sample_sigmas = options.get("sample_sigmas")
         if restyle and sample_sigmas is not None:
             step = _step_index(sigma, sample_sigmas)
             if step is not None and step < round(RESTYLE_SKIP * (len(sample_sigmas) - 1)):
-                return executor(x, timesteps, context, fps, padding_mask, **kwargs)
+                return call_main()
         dm = executor.class_obj
-        blocks = getattr(dm, "blocks", None)
-        if blocks is None or not hasattr(dm, "preprocess_text_embeds"):
-            raise RuntimeError("Broke Anima Style Reference only works with Anima models")
+        blocks = dm.blocks
 
         # the picture noised to this sigma with fixed noise (flow: x = (1 - sigma) x0 + sigma e)
         ref = ref_latent.to(x.device, x.dtype)
@@ -99,10 +111,13 @@ def _make_wrapper(ref_latent: torch.Tensor, ref_cond, strength: float, restyle: 
         if ckey not in ctx_cache:
             ctx_cache.clear()
             cross, meta = ref_cond
-            ids, weights = meta.get("t5xxl_ids"), meta.get("t5xxl_weights")
-            ctx_cache[ckey] = dm.preprocess_text_embeds(
-                cross.to(x.device, x.dtype), None if ids is None else ids.unsqueeze(0).to(x.device),
-                None if weights is None else weights.unsqueeze(0).unsqueeze(-1).to(x.device, x.dtype))
+            if family == "anima":
+                ids, weights = meta.get("t5xxl_ids"), meta.get("t5xxl_weights")
+                ctx_cache[ckey] = dm.preprocess_text_embeds(
+                    cross.to(x.device, x.dtype), None if ids is None else ids.unsqueeze(0).to(x.device),
+                    None if weights is None else weights.unsqueeze(0).unsqueeze(-1).to(x.device, x.dtype))
+            else:
+                ctx_cache[ckey] = cross.to(x.device, context.dtype)
         ctx = ctx_cache[ckey]
 
         n = x.shape[0] // len(flags)
@@ -111,35 +126,55 @@ def _make_wrapper(ref_latent: torch.Tensor, ref_cond, strength: float, restyle: 
         state = {"mode": "capture"}
 
         def hook_for(b):
-            def hook(module, args, out):
+            def hook(module, args, kw, out):
+                # Anima's blocks carry only the image's tokens; Krea 2's carry the text's first
+                a, e = kw["transformer_options"]["img_slice"] if family == "krea2" else (0, None)
+                img = out[:, a:e] if family == "krea2" else out
                 if state["mode"] == "capture":
-                    ref_stats[b] = _stats(out[:1])
+                    ref_stats[b] = _stats(img[:1])
                     return None
                 mr, vr = ref_stats[b]
                 y = out.clone()
-                part = out[rows].float()
+                part = img[rows].float()
                 mt, vt = _stats(part)
                 shape = (part.shape[0],) + (1,) * (part.ndim - 2) + (part.shape[-1],)
                 scale = ((vr + EPS) / (vt + EPS)).sqrt().reshape(shape)
                 target = (part - mt.reshape(shape)) * scale + mr.reshape(shape)
-                y[rows] = (part + strength * (target - part)).to(out.dtype)
+                moved = (part + strength * (target - part)).to(out.dtype)
+                if family == "krea2":
+                    y[rows, a:e] = moved
+                else:
+                    y[rows] = moved
                 return y
             return hook
 
-        handles = [blk.register_forward_hook(hook_for(b)) for b, blk in enumerate(blocks)]
+        handles = [blk.register_forward_hook(hook_for(b), with_kwargs=True) for b, blk in enumerate(blocks)]
         try:
             ref_options = dict(options)
             ref_options["cond_or_uncond"] = [0]
-            ref_kwargs = dict(kwargs)
-            ref_kwargs["transformer_options"] = ref_options
-            executor(x_ref, timesteps[:1], ctx.expand(1, -1, -1), fps, padding_mask, **ref_kwargs)
+            call_ref(x_ref, timesteps[:1], ctx.expand(1, *ctx.shape[1:]), ref_options)
             state["mode"] = "apply"
-            return executor(x, timesteps, context, fps, padding_mask, **kwargs)
+            return call_main()
         finally:
             for h in handles:
                 h.remove()
 
-    return wrapper
+    def anima(executor, x, timesteps, context, fps=None, padding_mask=None, **kwargs):
+        def call_ref(xr, t, ctx, ref_options):
+            ref_kwargs = dict(kwargs)
+            ref_kwargs["transformer_options"] = ref_options
+            executor(xr, t, ctx, fps, padding_mask, **ref_kwargs)
+        return run(executor, x, timesteps, context, call_ref,
+                   lambda: executor(x, timesteps, context, fps, padding_mask, **kwargs), kwargs.get("transformer_options", {}))
+
+    def krea2(executor, x, timesteps, context, attention_mask=None, ref_latents=None, transformer_options={}, **kwargs):
+        def call_ref(xr, t, ctx, ref_options):
+            executor(xr, t, ctx, None, None, ref_options, **kwargs)
+        return run(executor, x, timesteps, context, call_ref,
+                   lambda: executor(x, timesteps, context, attention_mask, ref_latents, transformer_options, **kwargs),
+                   transformer_options)
+
+    return anima if family == "anima" else krea2
 
 
 class BrokeAnimaStyleReference:
@@ -147,13 +182,13 @@ class BrokeAnimaStyleReference:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model": ("MODEL",),
-                "clip": ("CLIP", {"tooltip": "Anima's text encoder: encodes the reference pass's neutral caption"}),
+                "model": ("MODEL", {"tooltip": "an Anima or Krea 2 model"}),
+                "clip": ("CLIP", {"tooltip": "the model's text encoder: encodes the reference pass's neutral caption"}),
                 "vae": ("VAE",),
                 "image": ("IMAGE", {"tooltip": "the style picture (first image of the batch)"}),
                 "stats_match": ("FLOAT", {"default": 0.6, "min": 0.0, "max": 1.0, "step": 0.05,
                                           "tooltip": "how far each channel moves towards the picture's statistics after every block. "
-                                                     "0 = off; 0.6 is a good default; near 1 the image falls apart"}),
+                                                     "0 = off; 0.6 is a good default; near 1 the image falls apart on Anima"}),
                 "restyle": ("BOOLEAN", {"default": True,
                                         "tooltip": "leave the first quarter of the steps alone, keeping the composition the "
                                                    "prompt would have had without the picture"}),
@@ -168,18 +203,20 @@ class BrokeAnimaStyleReference:
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "apply"
     CATEGORY = "advanced/model"
-    DESCRIPTION = ("Training-free style from a picture for Anima: matches each block's per-channel statistics to the "
-                   "picture's at the same noise level. Takes palette, tonality and texture, not the subject.")
+    DESCRIPTION = ("Training-free style from a picture for Anima and Krea 2: matches each block's per-channel statistics "
+                   "to the picture's at the same noise level. Takes palette, tonality and texture, not the subject.")
 
     def apply(self, model, clip, vae, image, stats_match, restyle, reference_megapixels=MEGAPIXELS):
         if stats_match <= 0:
             return (model,)
+        family = _family(model)
         latent, (width, height) = _encode_image(model, vae, image, float(reference_megapixels))
-        cond = clip.encode_from_tokens_scheduled(clip.tokenize(CAPTION))[0]
+        caption = KREA2_CAPTION if family == "krea2" else CAPTION
+        cond = clip.encode_from_tokens_scheduled(clip.tokenize(caption))[0]
         m = model.clone()
         m.add_wrapper_with_key(comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL, WRAPPER_KEY,
-                               _make_wrapper(latent, cond, float(stats_match), bool(restyle)))
-        logging.info(f"[Broke Anima Style Reference] picture {width}x{height}, stats_match {stats_match}, restyle {restyle}")
+                               _make_wrapper(family, latent, cond, float(stats_match), bool(restyle)))
+        logging.info(f"[Broke Anima Style Reference] {family}, picture {width}x{height}, stats_match {stats_match}, restyle {restyle}")
         return (m,)
 
 
